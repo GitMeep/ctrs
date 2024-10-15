@@ -4,7 +4,7 @@ A "real-time" backprojection volumetric CT viewer written in Rust.
 
 ## Using
 
-Click the "open" button and select a scan descriptor `.json` file (examples coming soon). Use threshold to only display samples above that value.
+Click the "open" button and select a scan descriptor `.json` file. Example datasets can be found in the [data](./data/) directory. Use threshold to only display samples above that value.
 
 ## Building
 
