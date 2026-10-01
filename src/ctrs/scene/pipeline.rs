@@ -1,8 +1,7 @@
 pub mod uniforms;
 pub mod vertex;
 
-use iced::Rectangle;
-use iced_wgpu::wgpu::{self, util::DeviceExt};
+use iced::{Rectangle, wgpu::{self, util::DeviceExt}};
 use uniforms::{Camera, Projection};
 use vertex::Vertex;
 
@@ -28,72 +27,18 @@ pub struct Pipeline {
 
     camera_uniform_buffer: wgpu::Buffer,
 
+    projections_bind_group_layout: wgpu::BindGroupLayout,
+
     camera_bind_group: wgpu::BindGroup,
-    projections_bind_group: wgpu::BindGroup,
+    projections_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl Pipeline {
     pub fn new(
         device: &wgpu::Device, 
-        texture_format: &wgpu::TextureFormat,
-        queue: &wgpu::Queue,
-        projection_images: &[ScanImage],
-        proj_extent: (u32,u32,u32),
-        projections: &[Projection],
+        _queue: &wgpu::Queue,
+        format: wgpu::TextureFormat
     ) -> Self {
-        let buf_size: usize = projection_images.iter().map(|img| img.len()).sum();
-
-        let mut transformed_texture_data: Vec<f32> = Vec::with_capacity(buf_size);
-        for proj in projection_images {
-            transformed_texture_data.extend(proj.iter().map(|sample| -sample.ln()));
-        }
-
-        let max: f32 = transformed_texture_data.iter().copied().reduce(|prev, cur| prev.max(cur)).unwrap();
-        let normalized_texture_data: Vec<f32> = transformed_texture_data.iter().map(|sample| sample/max).collect();
-
-        // TODO: handle differing image sizes (maybe not here, but in CtScan::load_images)
-        let projections_extent = wgpu::Extent3d {
-            width: proj_extent.0,
-            height: proj_extent.1,
-            depth_or_array_layers: proj_extent.2,
-        };
-
-        let projections_texture = device.create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some("Projections texture"),
-                size: projections_extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            bytemuck::cast_slice(&normalized_texture_data)
-
-        );
-
-        let projections_view = projections_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let projections_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
-            label: Some("Projections texture sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            // border_color: Some(wgpu::SamplerBorderColor::OpaqueBlack),
-            ..Default::default()
-        });
-
-        let projections_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Projections storage buffer"),
-            usage: wgpu::BufferUsages::STORAGE,
-            contents: bytemuck::cast_slice(&projections) //&projections_wgsl,
-        });
-
         let projections_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Projections texture bind group layout"),
             entries: &[
@@ -122,25 +67,6 @@ impl Pipeline {
                         min_binding_size: None,
                     },
                     count: None,
-                }
-            ],
-        });
-
-        let projections_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Projections texture bind group"),
-            layout: &projections_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&projections_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&projections_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: projections_buffer.as_entire_binding(),
                 }
             ],
         });
@@ -207,7 +133,7 @@ impl Pipeline {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader_module,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
@@ -224,18 +150,20 @@ impl Pipeline {
                         }
                     ]
                 }],
+                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader_module,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: *texture_format,
+                    format: format,
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent::REPLACE,
                         alpha: wgpu::BlendComponent::REPLACE,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -249,6 +177,7 @@ impl Pipeline {
                 alpha_to_coverage_enabled: false
             },
             multiview: None,
+            cache: None,
         });
 
         Self {
@@ -257,8 +186,93 @@ impl Pipeline {
             index_buffer,
             camera_uniform_buffer,
             camera_bind_group,
-            projections_bind_group,
+            projections_bind_group_layout,
+            projections_bind_group: None,
         }
+    }
+
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        projection_images: &[ScanImage],
+        proj_extent: (u32,u32,u32),
+        projections: &[Projection],
+    ) {
+        if let Some(_) = self.projections_bind_group {
+            return;
+        }
+        
+        let buf_size: usize = projection_images.iter().map(|img| img.len()).sum();
+
+        let mut transformed_texture_data: Vec<f32> = Vec::with_capacity(buf_size);
+        for proj in projection_images {
+            transformed_texture_data.extend(proj.iter().map(|sample| -sample.ln()));
+        }
+
+        let max: f32 = transformed_texture_data.iter().copied().reduce(|prev, cur| prev.max(cur)).unwrap();
+        let normalized_texture_data: Vec<f32> = transformed_texture_data.iter().map(|sample| sample/max).collect();
+
+        // TODO: handle differing image sizes (maybe not here, but in CtScan::load_images)
+        let projections_extent = wgpu::Extent3d {
+            width: proj_extent.0,
+            height: proj_extent.1,
+            depth_or_array_layers: proj_extent.2,
+        };
+
+        let projections_texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Projections texture"),
+                size: projections_extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&normalized_texture_data)
+        );
+
+        let projections_view = projections_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let projections_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            label: Some("Projections texture sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            // border_color: Some(wgpu::SamplerBorderColor::OpaqueBlack),
+            ..Default::default()
+        });
+
+        let projections_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Projections storage buffer"),
+            usage: wgpu::BufferUsages::STORAGE,
+            contents: bytemuck::cast_slice(&projections) //&projections_wgsl,
+        });
+
+        self.projections_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Projections texture bind group"),
+            layout: &self.projections_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&projections_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&projections_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: projections_buffer.as_entire_binding(),
+                }
+            ],
+        }));
     }
 
     pub fn update_camera(&self, queue: &wgpu::Queue, camera: &Camera) {
@@ -280,6 +294,7 @@ impl Pipeline {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,

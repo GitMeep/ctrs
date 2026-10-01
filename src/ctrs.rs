@@ -3,10 +3,10 @@ mod scene;
 
 use std::{f32::consts::PI, io, sync::Arc};
 
-use iced::{alignment::Vertical, widget::{button, text_input, column, container, row, shader, text}, window, Alignment::Center, Element, Length::{Fill, FillPortion}, Subscription, Task, Theme};
-use iced_winit::runtime::Program;
-use scan::CtScan;
+use iced::{Alignment::Center, Element, Length::{Fill, FillPortion}, Subscription, Task, alignment::Vertical, widget::{button, column, container, row, shader, text, text_input}, window};
 use rfd::AsyncFileDialog;
+
+use scan::CtScan;
 use scene::Scene;
 
 #[derive(Debug, Clone)]
@@ -45,12 +45,8 @@ pub enum Message {
     Tick,
 }
 
-impl Program for CTRS {
-    type Theme = Theme;
-    type Message = Message;
-    type Renderer = iced_wgpu::Renderer;
-
-    fn update(&mut self, message: Message) -> Task<Message> {
+impl CTRS {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::OpenPressed => {
                 self.status_message = String::from("Loading scan...");
@@ -99,7 +95,7 @@ impl Program for CTRS {
         }
     }
 
-    fn view(&self) -> Element<'_, Self::Message, Self::Theme, Self::Renderer> {
+    pub fn view(&self) -> Element<'_, Message> {
         let status_message = text(self.status_message.clone());
 
         let top_bar = row![
@@ -109,7 +105,7 @@ impl Program for CTRS {
         ].spacing(5).padding(2).align_y(Vertical::Center).height(40).width(Fill);
 
         let shader_container = container({
-            let element: Element<'_, Self::Message, Self::Theme, Self::Renderer> = match &self.scene {
+            let element: Element<'_, Message> = match &self.scene {
                 Some(scene) => shader(scene)
                     .width(Fill)
                     .height(Fill)
@@ -162,9 +158,7 @@ impl Program for CTRS {
         
         .into()
     }
-}
 
-impl CTRS {
     pub fn subscription(&self) -> Subscription<Message> {
         window::frames().map(|_| Message::Tick )
     }

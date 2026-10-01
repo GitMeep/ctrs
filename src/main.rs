@@ -1,4 +1,4 @@
-use iced_winit::runtime::Program;
+use crate::ctrs::CTRS;
 
 mod ctrs;
 
@@ -6,14 +6,14 @@ fn main() -> iced::Result {
     env_logger::init();
 
     let app = iced::application(
-        "CTRS - Rust CT Viewer",
-        ctrs::CTRS::update,
-        ctrs::CTRS::view
+        CTRS::default,
+        CTRS::update,
+        CTRS::view
     )
     .settings(iced::Settings {
         id: Some("ctrs".into()),
         ..Default::default()
     })
-    .subscription(ctrs::CTRS::subscription);
+    .subscription(CTRS::subscription);
     app.run()
 }

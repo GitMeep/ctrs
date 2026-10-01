@@ -1,9 +1,8 @@
 mod pipeline;
 
-use std::{f32::consts::PI, sync::{Arc, RwLock}};
+use std::{f32::consts::PI, sync::Arc};
 
-use iced::{mouse, widget::shader};
-use iced_wgpu::wgpu;
+use iced::{Rectangle, mouse, wgpu, widget::shader::{self, Viewport}};
 use pipeline::{uniforms::{Camera, Projection}, Pipeline};
 
 use super::scan::CtScan;
@@ -13,7 +12,6 @@ pub struct Primitive {
     scan: Arc<CtScan>,
     projections: Arc<[Projection]>,
     camera_uniform: Camera,
-    new_scene: bool,
 }
 
 impl Primitive {
@@ -21,13 +19,11 @@ impl Primitive {
         scan: Arc<CtScan>,
         projections: Arc<[Projection]>,
         inclination: f32,
-        threshold: f32,
-        new_scene: bool
+        threshold: f32
     ) -> Self {
         Self {
             scan,
             projections,
-            new_scene,
             camera_uniform: Camera::new(
                 40.,
                 inclination,
@@ -40,43 +36,35 @@ impl Primitive {
 }
 
 impl shader::Primitive for Primitive {
+    type Pipeline = Pipeline;
+
     fn prepare(
         &self,
+        pipeline: &mut Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-        storage: &mut shader::Storage,
-        _bounds: &iced::Rectangle,
-        _viewport: &shader::Viewport,
+        _bounds: &Rectangle,
+        _viewport: &Viewport,
     ) {
-        // (re)create the pipeline if it doesn't exist or we have switched to a new scene
-        if !storage.has::<Pipeline>() || self.new_scene {
-            log::info!("Creating pipeline!");
-            let pipeline = Pipeline::new(
-                device,
-                &format,
-                queue,
-                &self.scan.projection_images,
-                (500,500,256), // TODO: don't have constant dimensions here
-                &self.projections,
-            );
-
-            storage.store(pipeline);
-        }
-
-        let pipeline = storage.get::<Pipeline>().unwrap();
+        pipeline.prepare(
+            device,
+            queue,
+            &self.scan.projection_images,
+            (500,500,256), // TODO: don't have constant dimensions here
+            &self.projections,
+        );
 
         pipeline.update_camera(queue, &self.camera_uniform);
     }
 
     fn render(
         &self,
+        pipeline: &Pipeline,
         encoder: &mut wgpu::CommandEncoder,
-        storage: &shader::Storage,
         target: &wgpu::TextureView,
-        clip_bounds: &iced::Rectangle<u32>,
+        clip_bounds: &Rectangle<u32>,
     ) {
-        storage.get::<Pipeline>().unwrap().render(target, encoder, clip_bounds);
+        pipeline.render(target, encoder, clip_bounds);
     }
 }
 
@@ -85,7 +73,6 @@ pub struct Scene {
     projections: Arc<[Projection]>,
     inclination: f32,
     threshold: f32,
-    new_scene: RwLock<bool>
 }
 
 impl Scene {
@@ -108,7 +95,6 @@ impl Scene {
             projections,
             inclination: 0.,
             threshold,
-            new_scene: RwLock::from(true),
         }
     }
 
@@ -131,18 +117,25 @@ impl<Message> shader::Program<Message> for Scene {
         _cursor: mouse::Cursor,
         _bounds: iced::Rectangle,
     ) -> Primitive {
-        let mut new_scene = self.new_scene.write().unwrap();
-
         let primitive = Primitive::new(
             self.scan.clone(),
             self.projections.clone(),
             self.inclination,
             self.threshold,
-            *new_scene,
         );
 
-        *new_scene = false;
-
         primitive
+    }
+}
+
+impl shader::Pipeline for Pipeline {
+    fn new(
+        device: &iced::wgpu::Device,
+        queue: &iced::wgpu::Queue,
+        format: iced::wgpu::TextureFormat,
+    ) -> Self
+    where
+        Self: Sized {
+        Self::new(device, queue, format)
     }
 }

@@ -20,8 +20,9 @@
                 }
             },
             "env": {
-                "WGPU_BACKEND": "gl",
-                "RUST_LOG": "info"
+                "WGPU_BACKEND": "vulkan",
+                "WGPU_POWER_PREF": "high",
+                "RUST_LOG": "debug,naga=warn"
             },
             "args": [],
             "cwd": "${workspaceFolder}"
