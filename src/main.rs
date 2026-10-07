@@ -1,7 +1,6 @@
 use crate::ctrs::CTRS;
 
 mod ctrs;
-
 fn main() -> iced::Result {
     env_logger::init();
 
@@ -12,8 +11,9 @@ fn main() -> iced::Result {
     )
     .settings(iced::Settings {
         id: Some("ctrs".into()),
+        antialiasing: false,
+        vsync: false,
         ..Default::default()
-    })
-    .subscription(CTRS::subscription);
+    });
     app.run()
 }

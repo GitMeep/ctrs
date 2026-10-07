@@ -1,9 +1,9 @@
 mod scan;
 mod scene;
 
-use std::{f32::consts::PI, io, sync::Arc};
+use std::{io, sync::Arc};
 
-use iced::{Alignment::Center, Element, Length::{Fill, FillPortion}, Subscription, Task, alignment::Vertical, widget::{button, column, container, row, shader, text, text_input}, window};
+use iced::{Alignment::Center, Element, Length::{Fill, FillPortion}, Task, alignment::Vertical, widget::{button, column, container, row, shader, text, slider}};
 use rfd::AsyncFileDialog;
 
 use scan::CtScan;
@@ -21,7 +21,7 @@ pub struct CTRS {
     scan: Option<Arc<CtScan>>,
     scene: Option<Scene>,
     status_message: String,
-    threshold: f32,
+    threshold: f32
 }
 
 impl Default for CTRS {
@@ -30,7 +30,7 @@ impl Default for CTRS {
             scan: Default::default(),
             scene: Default::default(),
             status_message: String::from("Please open a scan"),
-            threshold: 0.71,
+            threshold: 0.72,
         }
     }
 }
@@ -41,8 +41,8 @@ pub enum Message {
     HelpPressed,
     ScreenshotPressed,
     ScanLoaded(ScanLoadResult),
-    ThresholdEdited(String),
-    Tick,
+    ThresholdEdited(f32),
+    SliderReleased,
 }
 
 impl CTRS {
@@ -57,6 +57,7 @@ impl CTRS {
             Message::ScreenshotPressed => Task::none(),
             Message::ScanLoaded(Ok(scan)) => {
                 self.status_message = format!("Scan {} loaded", scan.name);
+
                 self.scene = Some(Scene::new(scan.clone(), self.threshold));
                 self.scan = Some(scan);
 
@@ -74,20 +75,19 @@ impl CTRS {
 
                 Task::none()
             },
-            Message::ThresholdEdited(str) => {
-                if let Ok(new) = str.parse::<f32>() {
-                    self.threshold = new;
-                    
-                    if let Some(scene) = &mut self.scene {
-                        scene.set_threshold(new);
-                    }
+            Message::ThresholdEdited(new) => {
+                self.threshold = new;
+                log::info!("Threshold: {new}");
+
+                if let Some(scene) = &mut self.scene {
+                    scene.set_threshold(new);
                 }
 
                 Task::none()
             },
-            Message::Tick => {
+            Message::SliderReleased => {
                 if let Some(scene) = &mut self.scene {
-                    scene.rotate(PI/16.);
+                    scene.set_rerender();
                 }
 
                 Task::none()
@@ -110,7 +110,7 @@ impl CTRS {
                     .width(Fill)
                     .height(Fill)
                     .into(),
-                None => text("No scan loaded").into(),
+                _ => text("No scan loaded").into(),
             };
 
             element
@@ -122,8 +122,10 @@ impl CTRS {
 
         let threshold_input = row![
             text("Threshold: "),
-            text_input("Enter threshold", &self.threshold.to_string())
-                .on_input(Message::ThresholdEdited)
+            slider(0.0..=1.0, self.threshold, Message::ThresholdEdited)
+                .on_release(Message::SliderReleased)
+                .step(0.05f32)
+                .shift_step(0.01f32)
                 .width(Fill)
         ]
         .width(Fill)
@@ -158,10 +160,6 @@ impl CTRS {
         
         .into()
     }
-
-    pub fn subscription(&self) -> Subscription<Message> {
-        window::frames().map(|_| Message::Tick )
-    }
 }
 
 async fn load_scan() -> ScanLoadResult {
@@ -171,13 +169,17 @@ async fn load_scan() -> ScanLoadResult {
         .pick_file()
         .await;
 
-    log::info!("Loading scan: {:?}", handle.as_ref());
+    
 
     match handle {
-        Some(path) => CtScan::from_file(path.path())
+        Some(path) => {
+            log::info!("Loading scan: {:?}", path.path());
+
+            CtScan::from_file(path.path())
             .await
             .map_err(|err| ScanLoadError::FileLoadError(Arc::new(err)))
-            .map(Arc::new),
-        None => Err(ScanLoadError::NonePicked),
+            .map(Arc::new)
+        },
+        _ => Err(ScanLoadError::NonePicked),
     }
 }

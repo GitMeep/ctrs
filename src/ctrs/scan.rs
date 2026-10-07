@@ -78,12 +78,14 @@ impl CtScan {
             task::spawn(async move {
                 let bytes = tokio::fs::read(path).await.unwrap();
 
-                ImageReader::new(Cursor::new(bytes))
+                let image = ImageReader::new(Cursor::new(bytes))
                     .with_guessed_format()
                     .unwrap()
                     .decode()
                     .unwrap()
-                    .to_luma32f()
+                    .to_luma32f();
+
+                return image;
             })
         });
 
@@ -92,5 +94,3 @@ impl CtScan {
         Ok(images)
     }
 }
-
-

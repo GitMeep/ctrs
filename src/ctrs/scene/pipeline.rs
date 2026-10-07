@@ -1,42 +1,32 @@
 pub mod uniforms;
-pub mod vertex;
+mod post_pipeline;
 
-use iced::{Rectangle, wgpu::{self, util::DeviceExt}};
+use std::collections::HashMap;
+
+use iced::{Rectangle, wgpu::{self, util::DeviceExt}, widget::shader};
 use uniforms::{Camera, Projection};
-use vertex::Vertex;
 
-use crate::ctrs::scan::ScanImage;
-
-const VERTICES: &[Vertex; 4] = &[
-    Vertex { position: [-1.0,  1.0], cam_coords: [-1.0,  1.0] }, // top left
-    Vertex { position: [-1.0, -1.0], cam_coords: [-1.0, -1.0] }, // bottom left
-    Vertex { position: [ 1.0, -1.0], cam_coords: [ 1.0, -1.0] }, // bottom right
-    Vertex { position: [ 1.0,  1.0], cam_coords: [ 1.0,  1.0] }, // top right
-];
-
-const INDICES: &[u16] = &[
-    0,1,2, // bottom left triangle
-    2,3,0, // top right triangle
-];
+use crate::ctrs::scene::pipeline::post_pipeline::PostPipeline;
 
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
-
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
+    post_pipeline: PostPipeline,
 
     camera_uniform_buffer: wgpu::Buffer,
 
     projections_bind_group_layout: wgpu::BindGroupLayout,
+    projections_bind_group: HashMap<String, wgpu::BindGroup>,
 
     camera_bind_group: wgpu::BindGroup,
-    projections_bind_group: Option<wgpu::BindGroup>,
+    
+    render_texture: Option<wgpu::Texture>,
+    render_texture_view: Option<wgpu::TextureView>,
+    texture_format: wgpu::TextureFormat,
 }
 
 impl Pipeline {
     pub fn new(
         device: &wgpu::Device, 
-        _queue: &wgpu::Queue,
         format: wgpu::TextureFormat
     ) -> Self {
         let projections_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -71,18 +61,6 @@ impl Pipeline {
             ],
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera buffer"),
             size: std::mem::size_of::<Camera>() as u64,
@@ -95,7 +73,7 @@ impl Pipeline {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -120,7 +98,7 @@ impl Pipeline {
         let shader_module = device.create_shader_module(wgpu::include_wgsl!("../shaders/shader.wgsl"));
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Camera bind group layout"),
+            label: Some("Render pipeline layout"),
             push_constant_ranges: &[],
             bind_group_layouts: &[
                 &projections_bind_group_layout,
@@ -134,35 +112,22 @@ impl Pipeline {
             vertex: wgpu::VertexState {
                 module: &shader_module,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x2,
-                        }
-                    ]
-                }],
+                buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader_module,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent::REPLACE,
-                        alpha: wgpu::BlendComponent::REPLACE,
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent::REPLACE,
+                            alpha: wgpu::BlendComponent::REPLACE,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -180,44 +145,38 @@ impl Pipeline {
             cache: None,
         });
 
+        let post_pipeline = PostPipeline::new(device, format);
+
         Self {
             pipeline,
-            vertex_buffer,
-            index_buffer,
+            post_pipeline,
             camera_uniform_buffer,
             camera_bind_group,
             projections_bind_group_layout,
-            projections_bind_group: None,
+            projections_bind_group: HashMap::new(),
+            render_texture: None,
+            render_texture_view: None,
+            texture_format: format,
         }
     }
 
-    pub fn prepare(
+    pub fn prepare_projections(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        projection_images: &[ScanImage],
-        proj_extent: (u32,u32,u32),
+        name: &str,
+        projections_texture: &[f32],
         projections: &[Projection],
+        extent: (u32, u32, u32)
     ) {
-        if let Some(_) = self.projections_bind_group {
+        if self.projections_bind_group.contains_key(name) {
             return;
         }
-        
-        let buf_size: usize = projection_images.iter().map(|img| img.len()).sum();
 
-        let mut transformed_texture_data: Vec<f32> = Vec::with_capacity(buf_size);
-        for proj in projection_images {
-            transformed_texture_data.extend(proj.iter().map(|sample| -sample.ln()));
-        }
-
-        let max: f32 = transformed_texture_data.iter().copied().reduce(|prev, cur| prev.max(cur)).unwrap();
-        let normalized_texture_data: Vec<f32> = transformed_texture_data.iter().map(|sample| sample/max).collect();
-
-        // TODO: handle differing image sizes (maybe not here, but in CtScan::load_images)
         let projections_extent = wgpu::Extent3d {
-            width: proj_extent.0,
-            height: proj_extent.1,
-            depth_or_array_layers: proj_extent.2,
+            width: extent.0,
+            height: extent.1,
+            depth_or_array_layers: extent.2,
         };
 
         let projections_texture = device.create_texture_with_data(
@@ -233,7 +192,7 @@ impl Pipeline {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            bytemuck::cast_slice(&normalized_texture_data)
+            bytemuck::cast_slice(&projections_texture)
         );
 
         let projections_view = projections_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -245,17 +204,16 @@ impl Pipeline {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
-            // border_color: Some(wgpu::SamplerBorderColor::OpaqueBlack),
             ..Default::default()
         });
 
         let projections_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Projections storage buffer"),
             usage: wgpu::BufferUsages::STORAGE,
-            contents: bytemuck::cast_slice(&projections) //&projections_wgsl,
+            contents: bytemuck::cast_slice(&projections),
         });
 
-        self.projections_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let projections_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Projections texture bind group"),
             layout: &self.projections_bind_group_layout,
             entries: &[
@@ -272,52 +230,141 @@ impl Pipeline {
                     resource: projections_buffer.as_entire_binding(),
                 }
             ],
-        }));
+        });
+
+        self.projections_bind_group.insert(name.into(), projections_bind_group);
+    }
+
+    pub fn prepare_render_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        bounds: &Rectangle,
+    ) {
+        let render_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("CTRS render buffer texture"),
+            size: wgpu::Extent3d {
+                width: bounds.width as u32,
+                height: bounds.height as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.texture_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let render_texture_view = render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.post_pipeline.prepare(device, &render_texture_view);
+
+        self.render_texture = Some(render_texture);
+        self.render_texture_view = Some(render_texture_view);
     }
 
     pub fn update_camera(&self, queue: &wgpu::Queue, camera: &Camera) {
         queue.write_buffer(&self.camera_uniform_buffer, 0, bytemuck::cast_slice(&[*camera]));
     }
 
-    pub fn render(
+    fn do_render(
         &self,
         target: &wgpu::TextureView,
+        buffer_target: &wgpu::TextureView,
         encoder: &mut wgpu::CommandEncoder,
-        viewport: &Rectangle<u32>,
+        clip_bounds: &Rectangle<u32>,
+        projections_bind_group: &wgpu::BindGroup
     ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("CTRS render pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("CTRS render pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: buffer_target,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            pass.set_pipeline(&self.pipeline);
+
+            pass.set_bind_group(0, projections_bind_group, &[]);
+            pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            
+            pass.draw(0..3, 0..1);
+        }
+
+        let mut post_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("CTRS post processing pass"),
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                }),
+            ],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
         });
 
-        pass.set_viewport(
-            viewport.x as f32,
-            viewport.y as f32,
-            viewport.width as f32,
-            viewport.height as f32,
+        post_pass.set_viewport(
+            clip_bounds.x as f32,
+            clip_bounds.y as f32,
+            clip_bounds.width as f32,
+            clip_bounds.height as f32,
             0.0,
             1.0
         );
 
-        pass.set_pipeline(&self.pipeline);
+        self.post_pipeline.apply(&mut post_pass);
+    }
 
-        pass.set_bind_group(0, &self.projections_bind_group, &[]);
-        pass.set_bind_group(1, &self.camera_bind_group, &[]);
+    pub fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        self.post_pipeline.apply(pass);
+    }
 
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        
-        pass.draw_indexed(0..6, 0, 0..1);
+    pub fn render(
+        &self,
+        target: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+        clip_bounds: &Rectangle<u32>,
+        name: &str,
+    ) {
+        match (&self.render_texture_view, &self.projections_bind_group.get(name)) {
+            (Some(view), Some(group)) => self.do_render(
+                target,
+                view,
+                encoder,
+                clip_bounds,
+                group
+            ),
+            _ => log::warn!("Rerender attempted with unprepared render texture and/or projections bind group")
+        }
+    }
+}
+
+impl shader::Pipeline for Pipeline {
+    fn new(
+        device: &iced::wgpu::Device,
+        _queue: &iced::wgpu::Queue,
+        format: iced::wgpu::TextureFormat,
+    ) -> Self {
+        Self::new(device, format)
     }
 }

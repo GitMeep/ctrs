@@ -3,41 +3,53 @@ use std::f32::consts::PI;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Camera {
-    pub position: [f32; 3],
-    _padding0: u32,
-    pub bases: [[f32; 4]; 2], // 2x3 matrix. The 4 is for alignment with WGSL
-    pub dimensions: [f32; 2],
+    pub bases: [[f32; 4]; 3], // 3x3 matrix. The 4 is for alignment with WGSL
     pub sampling_interval: f32,
+    pub sample_radius: f32,
+    pub sample_height: f32,
     pub threshold: f32,
 }
 
 impl Camera {
     pub fn new(
-        radius: f32,
+        azimuth: f32,
         inclination: f32,
         dimensions: (f32,f32),
         sampling_interval: f32,
+        sample_radius: f32,
+        sample_height: f32,
         threshold: f32
     ) -> Self {
-        let position = [
-            radius*inclination.cos(),
-            radius*inclination.sin(),
-            0.,
-        ];
-
         let bases = [
-            [-inclination.sin(), inclination.cos(), 0., 0.],
-            [0.,                 0.,                1., 0.],
+            // camera x-basis vector (out)
+            [
+                dimensions.1*inclination.sin()*azimuth.cos()/2.,
+                dimensions.1*inclination.sin()*azimuth.sin()/2.,
+                dimensions.1*inclination.cos()/2.,
+                0.,
+            ],
+            // camera y-basis vector (up)
+            [
+                -dimensions.0*azimuth.sin()/2.,
+                dimensions.0*azimuth.cos()/2.,
+                0.,
+                0.,
+            ],
+            // camera z-basis vector (out)
+            [
+                inclination.cos()*azimuth.cos(),
+                inclination.cos()*azimuth.sin(),
+                -inclination.sin(),
+                0.,
+            ],
         ];
 
         Self {
-            position,
             bases,
-            dimensions: [dimensions.0, dimensions.1],
             sampling_interval,
+            sample_radius,
+            sample_height,
             threshold,
-
-            _padding0: 0,
         }
     }
 }

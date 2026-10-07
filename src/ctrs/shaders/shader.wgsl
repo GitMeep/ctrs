@@ -1,34 +1,40 @@
-struct VertexInput {
-    @location(0) pos: vec2<f32>,
-    @location(1) cam_coords: vec2<f32>,
-};
-
 struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
-    @location(0) cam_coords: vec2<f32>,
+    @location(0) ray_origin: vec3<f32>,
 };
+
+struct CameraUniform {
+    bases: mat3x3<f32>,
+    sampling_interval: f32,
+    sample_radius: f32,
+    sample_height: f32,
+    threshold: f32,
+}
+
+@group(1) @binding(0)
+var<uniform> camera: CameraUniform;
 
 @vertex
 fn vs_main(
-    input: VertexInput
+    @builtin(vertex_index) index : u32
 ) -> VertexOutput {
-    var out: VertexOutput;
+    var vertices = array(
+        vec2f(-1.0, -1.0),
+        vec2f(-1.0,  3.0),
+        vec2f( 3.0, -1.0),
+    );
 
-    out.pos = vec4f(input.pos, 0.0, 1.0);
-    out.cam_coords = input.cam_coords;
+    let xy = vertices[index];
 
-    return out;
+    let pos = vec4f(xy, 0.0, 1.0);
+    let ray_origin = mat2x3(camera.bases[1], camera.bases[0]) * xy;
+
+    return VertexOutput(pos, ray_origin);
 }
 
-// -----------------------------------------------------------------------
-
-struct CameraUniform {
-    position: vec3<f32>,
-    bases: mat2x3<f32>,
-    dimensions: vec2<f32>,
-    sampling_interval: f32,
-    threshold: f32,
-}
+// -----------------------
+// Fragment shader:
+// -----------------------
 
 struct Projection {
     translate: vec3<f32>,
@@ -46,9 +52,6 @@ var projections_sampler: sampler;
 
 @group(0) @binding(2)
 var<storage, read> projections: array<Projection>;
-
-@group(1) @binding(0)
-var<uniform> camera: CameraUniform;
 
 // project point in world onto a projection plane as defined by an
 // index in the projections array
@@ -75,58 +78,74 @@ fn projection_to_texture(point_proj: vec2<f32>, index: u32) -> vec2<f32> {
 
 fn sample_volume(point_world: vec3<f32>, n_projections: u32) -> f32 {
     var sample_value: f32 = 0.;
-    var hits: u32 = 0;
+
     for (var i: u32 = 0; i < n_projections; i++) {
         let point_proj = project_point(point_world, i);
-        if point_proj.z > 0 {
-            let point_texture = projection_to_texture(point_proj.xy, i);
+        if point_proj.z < 0 {
+            continue;
+        }
 
-            if (point_texture.x >= -1. & point_texture.x <= 1. &
-                point_texture.y >= -1. & point_texture.y <= 1.)
-            {
-                sample_value += textureSample(
-                    projection_textures,
-                    projections_sampler,
-                    point_texture,
-                    i,
-                ).x;
-                hits++;
-            } else {
-                sample_value += 0.;
-            }
+        let point_texture = projection_to_texture(point_proj.xy, i);
+
+        if (point_texture.x >= 0. && point_texture.x <= 1. &&
+            point_texture.y >= 0. && point_texture.y <= 1.)
+        {
+            let dist = point_proj.z - camera.sample_radius;
+            sample_value += textureSample(
+                projection_textures,
+                projections_sampler,
+                point_texture,
+                i,
+            ).x;
         }
     }
 
-    if hits == n_projections {
-        return sample_value/f32(n_projections);
-    }
+    return sample_value/f32(n_projections);
+}
 
-    return 0.;
-    //return sample_value/f32(n_projections);
+fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
+    let K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, vec3(0.,0.,0.), vec3(1.,1.,1.)), c.y);
+}
+
+fn opacity_map(sample: f32) -> f32 {
+    return pow(sample,10.);
+}
+
+fn colormap(sample: f32) -> vec3<f32> {
+    let low_color = vec3(1., 0.79, 1.);
+    let high_color = vec3(0.56, 0.79, 1.);
+    return mix(low_color, high_color, sample);
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let n_projections: u32 = arrayLength(&projections);
-    var pixel_value: f32 = 0.;
 
-    let pixel = in.cam_coords * camera.dimensions/2.;
-    var sample_pos = camera.position + camera.bases * pixel;
-    let ray_direction = cross(camera.bases[1], camera.bases[0]);
+    let sr_sq = pow(camera.sample_radius, 2.);
+    let half_height = camera.sample_height/2.;
+
+    let ray_direction = camera.bases[2];
+    let step = ray_direction*camera.sampling_interval;
 
     var dist: f32 = 0;
-    var n_samples: f32 = 0;
-    while (dot(sample_pos, sample_pos) < pow(50., 2.)) {
-        if (dot(sample_pos, sample_pos) < pow(30., 2.)) {
+    var accu: f32 = 1;
+    var sample_pos = -ray_direction * vec3(camera.sample_radius) + in.ray_origin;
+    while (dist < camera.sample_radius*2.) {
+        if (dot(sample_pos.xy, sample_pos.xy) < sr_sq && abs(sample_pos.z) < half_height) {
             let sample = sample_volume(sample_pos, n_projections);
             if sample > camera.threshold {
-                pixel_value += sample;
+                accu -= accu * sample;
             }
-            n_samples += 1.;
         }
-        sample_pos += ray_direction*camera.sampling_interval;
+        dist += camera.sampling_interval;
+        sample_pos += step;
     }
 
-    pixel_value /= n_samples;
-    return vec4(pixel_value, pixel_value, pixel_value, 1.0);
+    if accu == 1. {
+        return vec4(0., 0., 0., 1.);
+    }
+
+    return vec4(hsv2rgb(colormap(1.-accu)), 1.);
 }
